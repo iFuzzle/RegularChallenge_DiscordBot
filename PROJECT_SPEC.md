@@ -277,8 +277,8 @@ RegularChallenge_DiscordBot/
   "trick_only": false }`
   → genutzt für Condition-Constraints (level-spezifische Conditions)
   - `can_fall_off_edge`: auf dieser Strecke kann man vom Rand/aus der Map fallen
-    (Schalter für die „fall off the map"-Condition; z.B. Quicksand Valley = true,
-    Rookie Mountain = false wegen Guard Rails).
+    (Schalter für die Fall-Off-Conditions). Bei SBK1 **alle Strecken = true außer
+    Rookie Mountain** (`false`, Guard Rails überall).
   - `trick_only`: dedizierte Trick-Game-Map (keine reguläre Rennstrecke).
 
 **`conditions`** — der wiederverwendbare Regel-Pool
@@ -996,8 +996,8 @@ challenges.example.com {
 
 1. **SBK-1-Datenpool:** In Anhang A **recherchiert & abgeglichen** (Charaktere,
    Boards, Levels, Modi, Mode↔Level-Verfügbarkeit). Beim Seed noch verifizieren:
-   exakte **Shinobin-Board-Namen**, `can_fall_off_edge` pro Strecke (Stand:
-   nur Quicksand Valley), Half-Pipe-Name, Standard-Board-Level (1–3).
+   exakte **Shinobin-Board-Namen**, Half-Pipe-Name, Standard-Board-Level (1–3).
+   (`can_fall_off_edge` ist geklärt: alle Strecken außer Rookie Mountain.)
 2. **Condition-/Difficulty-Werte:** realistische Zahlen gegen **speedrun.com/sbk**
    kalibrieren (Platzhalter in Anhang A).
 3. **Season-Grenze exakt:** 1. Jan **20:00 UTC** (Anker-konform) vs. 00:00 UTC —
@@ -1060,21 +1060,20 @@ challenges.example.com {
 
 | name | unlock (im Spiel) | attributes |
 |---|---|---|
-| `Rookie Mountain` | Start | `lap_based`; `can_fall_off_edge=false` (Guard Rails) |
-| `Big Snowman` | Start | `lap_based` |
-| `Sunset Rock` | Start | `lap_based` |
-| `Night Highway` | Start | `lap_based` |
-| `Grass Valley` | Start | `lap_based` |
-| `Dizzy Land` | Start | `lap_based` |
-| `Quicksand Valley` | Copper Pass (Gold auf Basis-6) | `lap_based`; **`can_fall_off_edge=true`** |
-| `Silver Mountain` | Silver Pass | `lap_based` |
-| `Ninja Land` | Gold Pass; Sieg schaltet **Shinobin** frei | `lap_based` |
+| `Rookie Mountain` | Start | `lap_based`; **`can_fall_off_edge=false`** (Guard Rails) |
+| `Big Snowman` | Start | `lap_based`; `can_fall_off_edge=true` |
+| `Sunset Rock` | Start | `lap_based`; `can_fall_off_edge=true` |
+| `Night Highway` | Start | `lap_based`; `can_fall_off_edge=true` |
+| `Grass Valley` | Start | `lap_based`; `can_fall_off_edge=true` |
+| `Dizzy Land` | Start | `lap_based`; `can_fall_off_edge=true` |
+| `Quicksand Valley` | Copper Pass (Gold auf Basis-6) | `lap_based`; `can_fall_off_edge=true` |
+| `Silver Mountain` | Silver Pass | `lap_based`; `can_fall_off_edge=true` |
+| `Ninja Land` | Gold Pass; Sieg schaltet **Shinobin** frei | `lap_based`; `can_fall_off_edge=true` |
 | `Half-Pipe` | – (nur Trick Game) | `trick_only=true` |
 
-> **`can_fall_off_edge`** markiert Strecken, auf denen man tatsächlich vom Rand/
-> aus der Map fallen kann (Schalter für die „fall off the map"-Condition). Stand
-> Recherche/Community: praktisch nur **Quicksand Valley**; die übrigen Strecken
-> haben Guard Rails → `false`. Pro Strecke mit der Community final verifizieren.
+> **`can_fall_off_edge`** markiert Strecken, auf denen man vom Rand/aus der Map
+> fallen kann (Schalter für die Fall-Off-Conditions). Bei SBK1: **alle Strecken
+> `true` außer Rookie Mountain** (`false`, überall Guard Rails).
 
 **Modes (5) + Strecken-Verfügbarkeit (`mode_levels`):**
 
@@ -1118,6 +1117,8 @@ challenges.example.com {
 | `special_tricks` | „{n} unterschiedliche Spezial-Tricks" | numeric | nein | `excludes:[no_jumping,no_tricks]` |
 | `spin_all_directions` | „Spin-Trick in jede Richtung" | pass_fail | ja | – |
 | `fall_off_map_n` | „Falle {n}× von der Map" | numeric | ja | `level_attribute:can_fall_off_edge` |
+| `no_fall_off` | „Falle **0×** von der Map" | pass_fail | ja | `level_attribute:can_fall_off_edge` |
+| `fall_off_min_n_still_win` | „Falle **mindestens {n}×** von der Map und werde trotzdem Erster" | numeric | nein | `level_attribute:can_fall_off_edge`, `modes:[battle_race]` |
 | `button_restriction` | „Verzicht auf Eingabe: {button}" | pass_fail | ja | – |
 | `win_from_4th_lap3` | „Gewinne, obwohl zu Beginn von Lap 3 auf Platz 4" | pass_fail | nein | `level_attribute:lap_based`, `modes:[battle_race]` |
 | `zoolander` | „Keine Linkskurven (Zoolander)" | pass_fail | ja | – |
@@ -1128,6 +1129,7 @@ challenges.example.com {
 > - `hit_every_cpu_n`: easy=1, medium=2, hard=3
 > - `special_tricks`: easy=2, medium=3, hard=4
 > - `fall_off_map_n`: easy=1, medium=2, hard=3
+> - `fall_off_min_n_still_win`: easy=1, medium=2, hard=3 (**Max. 3**)
 > - `shoot_snowmen_n` / `trick_points_n`: gegen reale Bestwerte kalibrieren
 
 > **Kalibrierung der Wertungen/Schwierigkeiten:** Realistische Ziel-Zeiten und
@@ -1159,6 +1161,12 @@ challenges.example.com {
 > **Shinobin** · Board **Shinobin Board 2** *(nur Shinobin-Boards möglich)* ·
 > **Silver Mountain** · Modus **Battle Race**
 > **Auflage:** Keine Items
+> *Wertung: schnellste Zeit · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
+
+**Battle Race mit Fall-Off-Twist (medium, metric_type = time):**
+> 🏂 **Weekly Challenge** — *Snowboard Kids*
+> **Jam** · Board **All-Around** · **Quicksand Valley** · Modus **Battle Race**
+> **Auflage:** Falle **mindestens 2×** von der Map — und werde **trotzdem Erster**
 > *Wertung: schnellste Zeit · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
 
 **Shot Game (zeigt Mode↔Level-Regel — nur erste 3 Strecken):**
