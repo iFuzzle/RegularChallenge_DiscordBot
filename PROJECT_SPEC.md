@@ -248,9 +248,21 @@ RegularChallenge_DiscordBot/
 
 ### 6.2 Component-Pools (pro Game, **admin-pflegbar**)
 
-**`characters`** — `id`, `game_id` (FK), `name`, `is_active`, `meta` (JSONB)
+**`characters`**
+- `id`, `game_id` (FK), `name`, `is_active`, `meta` (JSONB)
+- `uses_exclusive_boards_only` (bool, Default false): wenn `true`, darf der
+  Charakter **nur** seine exklusiven Boards verwenden (z.B. **Shinobin** in SBK1).
 
-**`boards`** — `id`, `game_id` (FK), `name`, `is_active`, `meta` (JSONB)
+**`boards`**
+- `id`, `game_id` (FK), `name`, `is_active`, `meta` (JSONB)
+- `board_class`: `standard` | `special` | `exclusive`
+- `exclusive_to_character_id` (FK characters, nullable): wenn gesetzt, ist das
+  Board **nur** für diesen Charakter wählbar (Shinobins eigene Boards).
+
+**`modes`** — Spielmodi (pro Game, optionaler Challenge-Baustein)
+- `id`, `game_id` (FK), `key`, `name`, `is_active`
+- SBK1: `battle_race` (Standard), `time_attack`, `trick_game`, `speed_game`,
+  `shot_game` (siehe Anhang A).
 
 **`levels`**
 - `id`, `game_id` (FK), `name`, `is_active`
@@ -266,7 +278,9 @@ RegularChallenge_DiscordBot/
 - `bonus_eligible` (bool): darf als Condition2/Bonus gezogen werden
 - `requires` (JSONB Constraints): z.B.
   `{ "level_attribute": "has_fall_off_zone" }`,
-  `{ "excludes_conditions": ["no_jumping"] }`
+  `{ "excludes_conditions": ["no_jumping"] }`,
+  `{ "modes": ["battle_race"] }` (Condition nur in bestimmten Modi gültig, z.B.
+  „triff alle 3 Gegner" nur im Battle Race)
 - `weight` (int, Default 1): Ziehwahrscheinlichkeit
 - `applies_to_metric` (optional Hinweis: `time` | `score` | `none`)
 
@@ -277,7 +291,8 @@ RegularChallenge_DiscordBot/
 - `period_type`: `weekly` | `monthly` | `daily`
 - `starts_at`, `ends_at` (UTC, inklusiv/exklusiv klar definieren)
 - **Bausteine** (nullable bei reinem Freitext):
-  `character_id`, `board_id`, `level_id`, `condition1_id`, `condition2_id`
+  `character_id`, `board_id`, `level_id`, `mode_id` (optional), `condition1_id`,
+  `condition2_id`
 - `difficulty`: `easy` | `medium` | `hard`
 - `condition1_value`, `condition2_value` (konkretisierte numerische Werte)
 - `source`: `generated` | `custom`
@@ -374,25 +389,31 @@ def generate_challenge(guild, game, period_type, starts_at, ends_at):
 
     # 2) Bausteine ziehen (nur is_active)
     character = rng.choice(active_characters(game))
-    board     = rng.choice(active_boards(game))
     level     = rng.choice(active_levels(game))
+    mode      = rng.choice(active_modes(game))      # optional, je nach Game-Config
+
+    # 2a) Board passend zum Charakter (Shinobin-Regel!)
+    if character.uses_exclusive_boards_only:
+        board = rng.choice(exclusive_boards_for(character))   # nur seine Boards
+    else:
+        board = rng.choice(non_exclusive_boards(game))        # keine Exklusiv-Boards
 
     # 3) Difficulty wählen (gewichtet, z.B. easy 40 / medium 40 / hard 20)
     difficulty = weighted_choice(rng, DIFFICULTY_WEIGHTS)
 
-    # 4) Condition1 ziehen, die zum Level passt (requires erfüllt)
+    # 4) Condition1 ziehen, die zu Level UND Modus passt (requires erfüllt)
     cond1 = weighted_choice(
         rng,
-        eligible_conditions(game, level, exclude=[], bonus_only=False),
+        eligible_conditions(game, level, mode, exclude=[], bonus_only=False),
     )
     cond1_value = resolve_numeric(cond1, difficulty, rng)
 
-    # 5) Optional Condition2 (Bonus), kompatibel mit cond1 & level
+    # 5) Optional Condition2 (Bonus), kompatibel mit cond1, Level & Modus
     cond2 = cond2_value = None
     if rng.random() < CONDITION2_PROBABILITY:
         cond2 = weighted_choice(
             rng,
-            eligible_conditions(game, level, exclude=[cond1], bonus_only=True),
+            eligible_conditions(game, level, mode, exclude=[cond1], bonus_only=True),
         )
         if cond2:
             cond2_value = resolve_numeric(cond2, difficulty, rng)
@@ -401,12 +422,19 @@ def generate_challenge(guild, game, period_type, starts_at, ends_at):
     if collides_with_recent(...):
         return generate_challenge(...)  # bounded retries
 
-    return assemble(character, board, level, cond1, cond1_value,
+    return assemble(character, board, level, mode, cond1, cond1_value,
                     cond2, cond2_value, difficulty, metric_type, ...)
 ```
 
 ### 7.3 Constraints & Regeln (MUSS)
 
+- **Board-/Charakter-Kompatibilität (MUSS):** Charaktere mit
+  `uses_exclusive_boards_only` (z.B. **Shinobin**) erhalten **nur** ihre
+  exklusiven Boards; Exklusiv-Boards dürfen **niemals** anderen Charakteren
+  zugewiesen werden.
+- **Modus-Kompatibilität:** Eine Condition mit `requires.modes` darf nur in den
+  genannten Modi gezogen werden (z.B. „triff alle 3 Gegner" nur im Battle Race,
+  nicht im Time Attack).
 - **Level-Kompatibilität:** Eine Condition mit `requires.level_attribute` darf nur
   gezogen werden, wenn das Level dieses Attribut besitzt (z.B. „fall off the map"
   nur bei `has_fall_off_zone`).
@@ -839,12 +867,9 @@ challenges.example.com {
 >
 > **Noch offen / beim Implementieren festzulegen:**
 
-1. **SBK-1-Datenpool:** Charaktere/Boards/Levels/Conditions in Anhang A sind ein
-   **vorläufiger Seed** und MÜSSEN gegen das echte Spiel verifiziert werden.
-   Pools sind ohnehin admin-pflegbar. (Hinweis: einige in den ursprünglichen
-   Beispielen genannten Begriffe wie „Alpine 2", „Star", „Sunset Rock",
-   „Ninja Land" stammen evtl. aus **SBK 2**, nicht SBK 1 — bitte beim Verifizieren
-   beachten.) — **verifizieren** (Quellen siehe unten)
+1. **SBK-1-Datenpool:** In Anhang A **recherchiert & abgeglichen** (Charaktere,
+   Boards, Levels, Modi). Beim Seed noch verifizieren: exakte **Shinobin-Board-
+   Namen**, `has_fall_off_zone` pro Strecke, Standard-Board-Level (1–3).
 2. **Season-Grenze exakt:** 1. Jan **20:00 UTC** (Anker-konform) vs. 00:00 UTC —
    beim Implementieren final festlegen.
 3. **Discord-Bibliothek:** `discord.py` angenommen (Alternativen `py-cord`/
@@ -852,34 +877,82 @@ challenges.example.com {
 4. **ID-Strategie & Frontend-CSS** (Pico vs. Tailwind): Implementierungsdetail,
    beim Scaffolding festlegen.
 
-### Quellen zur SBK-1-Datenverifikation
+### Quellen zur SBK-1-Recherche
 
-- **Snowboard Kids Wiki (Fandom):** <https://snowboardkids.fandom.com/> —
-  Charaktere, Boards, Strecken pro Spiel.
-- **StrategyWiki – Snowboard Kids:** <https://strategywiki.org/wiki/Snowboard_Kids>
-- **GameFAQs (N64) – Snowboard Kids:** Guides/FAQs mit Shop-Boards & Strecken,
-  <https://gamefaqs.gamespot.com/n64/198848-snowboard-kids>
+- **Snowboard Kids Wiki (Fandom):** <https://sbk.fandom.com/wiki/Snowboard_Kids>
+- **StrategyWiki – Snowboard Kids (Characters/Courses):**
+  <https://strategywiki.org/wiki/Snowboard_Kids>
+- **GameFAQs (N64) – Snowboard Kids (Guides/Cheats):**
+  <https://gamefaqs.gamespot.com/n64/366874-snowboard-kids>
 - **MobyGames:** <https://www.mobygames.com/game/snowboard-kids/> (Release-Infos)
 - **Original-Handbuch (N64)** als verlässlichste Quelle für exakte Boards/Namen.
 
 ---
 
-## Anhang A: SBK-1-Datenpool (Seed, zu verifizieren)
+## Anhang A: SBK-1-Datenpool (recherchiert)
 
-> ⚠️ **Vorläufig.** Vor dem Seed gegen *Snowboard Kids 1 (N64, 1997)* prüfen.
-> Endgültige Pflege erfolgt über das Web-Panel. Begriffe ohne Gewähr.
+> ✅ Recherchiert für *Snowboard Kids (N64, 1997/98)* und mit dem Auftraggeber
+> abgeglichen (Community-Wissen). Endgültige Feinpflege (Stats, Trick-Namen)
+> erfolgt über das Web-Panel. Da bei allen Spielern alles freigeschaltet ist
+> (Cheat/Savegame), gelten **keine** Unlock-Beschränkungen für die Generierung —
+> jede Kombination (z.B. „Shinobin · Silver Mountain") ist erlaubt.
 
-**Characters (SBK 1, zu prüfen):**
-`Slash Kamei`, `Nancy Neil`, `Jam Kuehnemund`, `Linda Maltini`,
-`Tommy Erikkson`, `Wendy Lane`, (unlockable) `Shinobin`, `Pumpkin/Snowman (?)`.
+**Characters (6):**
 
-**Boards (SBK 1, zu prüfen):**
-Im Shop kaufbare Boards — exakte Namen/Anzahl beim Verifizieren festlegen.
+| name | typ | Hinweis |
+|---|---|---|
+| `Slash` | Starter | |
+| `Nancy` | Starter | |
+| `Jam` | Starter | |
+| `Linda` | Starter | |
+| `Tommy` | Starter | |
+| `Shinobin` | Secret | `uses_exclusive_boards_only = true` → **nur** seine eigenen Boards |
 
-**Levels (SBK 1, zu prüfen):**
-`Sunny Mountain`, `Big Snowman`, `Quicksand Valley`, `Night Highway`,
-`Silver Mountain`, `Grass Valley`, `Dizzy Land`, … (vollständige Liste prüfen;
-einige o.g. Beispielnamen gehören evtl. zu SBK 2).
+**Boards:**
+
+| name | board_class | Hinweis |
+|---|---|---|
+| `Alpine` | standard | schnell, schwer steuerbar |
+| `All-Around` | standard | ausgewogen |
+| `Freestyle` | standard | dreht schnell/leicht, langsam (= dein „Trickster") |
+| `Star Board` | special | nach Sieg gegen Shinobin (Ninja Land) kaufbar |
+| `Ice Board` | special | nach Kauf aller 3 Standard-Boards (Lvl 3) |
+| `Feather Board` | special | aus dem Trick Game; kurzer Float-Effekt am Sprung |
+| `Shinobin Board 1–3` | exclusive | `exclusive_to_character_id = Shinobin`; **nur** Shinobin (exakte Namen beim Seed verifizieren) |
+
+> Hinweis: Standard-Boards haben im Spiel Level 1–3 (Upgrades). Für Challenges
+> i.d.R. irrelevant; bei Bedarf als `meta`-Feld modellierbar.
+
+**Levels (9):**
+
+| name | unlock (im Spiel) | attributes (Vorschlag) |
+|---|---|---|
+| `Rookie Mountain` | Start | `lap_based` |
+| `Big Snowman` | Start | `lap_based` |
+| `Sunset Rock` | Start | `lap_based` |
+| `Night Highway` | Start | `lap_based` |
+| `Grass Valley` | Start | `lap_based` |
+| `Dizzy Land` | Start | `lap_based` |
+| `Quicksand Valley` | Gold Cups Strecke 1–6 | `lap_based`, `has_fall_off_zone` (prüfen) |
+| `Silver Mountain` | Gold Cups inkl. Quicksand V. | `lap_based`, `has_fall_off_zone` (prüfen) |
+| `Ninja Land` | Gold Cups inkl. Silver M.; Sieg schaltet **Shinobin** frei | `lap_based`, `has_fall_off_zone` (prüfen) |
+
+> `has_fall_off_zone` pro Strecke beim Seed verifizieren (steuert die
+> „fall off the map"-Condition).
+
+**Modes (5):**
+
+| key | name | Hinweis |
+|---|---|---|
+| `battle_race` | Battle Race | Standard-Rennen mit Items/Gegnern |
+| `time_attack` | Time Attack | Bestzeit, keine Items |
+| `trick_game` | Trick Game | Punkte für Tricks (eigene Mini-Level) |
+| `speed_game` | Speed Game | wie Time Attack, mit Speed-Fans |
+| `shot_game` | Shot Game | Schneemänner/Gegner mit Items abschießen |
+
+> Modus ist ein **optionaler** Baustein. Viele Conditions sind modus-spezifisch
+> (z.B. „triff alle 3 Gegner" → `requires.modes: [battle_race]`; „X Punkte im
+> Trick" → `trick_game`).
 
 **Conditions (Pool, McGyna-Ideen → als Daten modellieren):**
 
@@ -914,17 +987,24 @@ einige o.g. Beispielnamen gehören evtl. zu SBK 2).
 
 **Weekly (generated, medium, metric_type = time):**
 > 🏂 **Weekly Challenge** — *Snowboard Kids*
-> **Slash** · Board **Big Air** · **Sunny Mountain**
+> **Slash** · Board **Alpine** · **Rookie Mountain** · Modus **Battle Race**
 > **Auflage:** Keine Tricks
 > **⭐ Bonus:** Keine blauen Items
 > *Wertung: schnellste Zeit · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
 
 **Monthly (generated, hard, metric_type = score):**
 > 🏂 **Monthly Challenge** — *Snowboard Kids*
-> **Nancy** · Board **Star** · **Ninja Land**
+> **Nancy** · Board **Star Board** · **Ninja Land** · Modus **Battle Race**
 > **Auflage:** Triff jeden CPU 3×
 > **⭐ Bonus:** Triff 1 CPU mit Eis
 > *Wertung: höchste Punktzahl · 1. 20:00 UTC – 1. Folgemonat 20:00 UTC*
+
+**Shinobin-Beispiel (zeigt Board-Regel):**
+> 🏂 **Weekly Challenge** — *Snowboard Kids*
+> **Shinobin** · Board **Shinobin Board 2** *(nur Shinobin-Boards möglich)* ·
+> **Silver Mountain** · Modus **Battle Race**
+> **Auflage:** Keine Items
+> *Wertung: schnellste Zeit · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
 
 **Custom (admin freetext):**
 > 🏂 **Weekly Challenge (Special)** — *Snowboard Kids*
