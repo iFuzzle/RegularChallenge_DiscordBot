@@ -256,8 +256,15 @@ RegularChallenge_DiscordBot/
 **`boards`**
 - `id`, `game_id` (FK), `name`, `is_active`, `meta` (JSONB)
 - `board_class`: `standard` | `special` | `exclusive`
+- `has_levels` (bool): nur **Standard-Boards** haben Stufen (Level 1–3);
+  Special- und Exclusive-Boards haben **keine** Level.
 - `exclusive_to_character_id` (FK characters, nullable): wenn gesetzt, ist das
   Board **nur** für diesen Charakter wählbar (Shinobins eigene Boards).
+- **Board-Level-Regel (MUSS):**
+  - Wird ein Board **ohne** konkretes Level angegeben, gilt immer **Level 3**.
+  - Levels greifen **nur** bei Standard-Boards. Special/Exclusive haben kein Level.
+  - In Renn-Challenges wird ein Board-Level i.d.R. **nicht** angezeigt → es ist
+    implizit Level 3 (kein „besorge erst ein Board"-Aufwand für Teilnehmer).
 
 **`modes`** — Spielmodi (pro Game, optionaler Challenge-Baustein)
 - `id`, `game_id` (FK), `key`, `name`, `is_active`
@@ -506,6 +513,12 @@ Strecke gebunden sind. Beispiele (SBK1):
   Copper-Pass-Laufs bestehen oft genau daraus). Metrik = Zeit.
 - „**Alle 3 Standard-Boards auf Level 3**" — Bestzeit oder pass/fail.
 - „**{n} Gold sammeln**" — skalierbar.
+
+**Regeln für Board-Unlock-Objectives (MUSS):**
+- **Nur Standard-Boards**, **nur Level 3**. Level 1 ist sofort frei, Level 2 zu
+  einfach → kommen **nie** als Objective vor.
+- **Special-/Exclusive-Boards niemals** als Unlock-Objective (Freispielen ist zu
+  lang/umständlich).
 
 Sie werden aus dem `objectives`-Pool gezogen (selten, `OBJECTIVE_PROBABILITY`)
 oder bevorzugt **vom Admin geplant**. `metric_type` kommt aus dem Objective.
@@ -1052,9 +1065,10 @@ challenges.example.com {
 | `Feather Board` | special | aus dem Trick Game; kurzer Float-Effekt am Sprung |
 | `Shinobin Board 1–3` | exclusive | `exclusive_to_character_id = Shinobin`; **nur** Shinobin (exakte Namen beim Seed verifizieren) |
 
-> Hinweis: Standard-Boards haben im Spiel Level 1–3 (Upgrades). Für Renn-
-> Challenges i.d.R. irrelevant, aber Basis für **Objective-Challenges** wie
-> „Alpine auf Level 3 freispielen" (§7.5).
+> Hinweis: Nur **Standard-Boards** (Alpine, All-Around, Freestyle) haben Level
+> 1–3; Special-/Exclusive-Boards haben **keine** Level. **Board ohne Level-Angabe
+> ⇒ immer Level 3** (Board-Level-Regel, §6.2). Level 1 ist sofort frei, Level 2
+> zu einfach → als Objective ist nur **Level 3** sinnvoll (§7.5).
 
 **Levels (9 Rennstrecken + 1 Trick-Map):**
 
