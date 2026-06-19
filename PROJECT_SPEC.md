@@ -316,10 +316,13 @@ RegularChallenge_DiscordBot/
 
 **`points_ledger`** — kumulative Punkte (Append-only Audit)
 - `id` (PK), `user_id` (FK), `guild_id` (FK), `game_id` (FK)
-- `points` (Default 1), `submission_id` (FK, unique → Idempotenz)
+- `season` (int, z.B. Jahr `2026`) — für jährlichen Reset / archivierte Seasons
+- `points` (Default 1), `challenge_id` (FK)
 - `awarded_at`
-- **Regel:** Genau **1 Punkt pro bestätigtem Run**. Bei `deny`/Revert wird der
-  Ledger-Eintrag entfernt/storniert (siehe §10).
+- **Regel:** Genau **1 Punkt pro Spieler pro Challenge** (Unique-Constraint über
+  (`user_id`, `challenge_id`) erzwingt das, unabhängig von der Zahl der
+  Einreichungen). Bei `deny`/Revert des wertenden Runs wird der Ledger-Eintrag
+  entfernt/storniert (siehe §10).
 
 **`mod_actions`** — Audit-Log (alle Mod-Entscheidungen)
 - `id`, `guild_id`, `mod_id`, `action` (`confirm`/`deny`/`set_metric`/`resort`/
@@ -333,8 +336,8 @@ RegularChallenge_DiscordBot/
 
 - **Per-Challenge-Rangliste:** bestätigte `submissions` einer Challenge,
   sortiert nach `default_sort` (Mod kann live umsortieren, §10).
-- **Punkte-Leaderboard:** Summe `points_ledger` je `user` (× Guild × Game,
-  All-Time; Periodenfilter ableitbar).
+- **Punkte-Leaderboard:** Summe `points_ledger` je `user` (× Guild × Game ×
+  Season; Periodenfilter ableitbar).
 - **Streak:** aus bestätigten Submissions je Spieler über aufeinanderfolgende
   Perioden berechnet.
 
@@ -441,17 +444,19 @@ beginnen/enden. Deshalb:
 - **Alle Perioden-Grenzen werden in UTC berechnet und gespeichert.**
 - Anzeige KANN pro Nutzer/Guild lokalisiert werden, die *Logik* bleibt UTC.
 
-### 8.2 Periodendefinitionen
+### 8.2 Periodendefinitionen (festgelegt)
 
-- **Weekly:** Beginn **Montag 00:00 UTC**, Ende **Sonntag 23:59:59 UTC**
-  (intern: `[Mon 00:00 UTC, nächster Mon 00:00 UTC)`).
-- **Monthly:** Beginn **1. des Monats 00:00 UTC**, Ende **letzter Tag 23:59:59 UTC**.
-- **Daily** (*später, Phase 3*): `[00:00 UTC, 24:00 UTC)`.
+**Anker-Uhrzeit = 20:00 UTC** (fairer Kompromiss USA / DE / AU, siehe §8.4).
+Periodengrenze **und** Posting fallen auf diesen Anker zusammen, alles in UTC,
+für alle Mitglieder identisch. Konfigurierbar pro Guild über `guilds.config`.
 
-> **Annahme (bestätigen):** Wochen-/Monatsanker = **UTC**. Falls ein anderer
-> gemeinsamer Anker gewünscht ist (z.B. ein fairer Kompromiss zwischen AU/DE),
-> ist das über `guilds.config` konfigurierbar, bleibt aber für alle Mitglieder
-> identisch. Siehe §16.
+- **Weekly:** `[Montag 20:00 UTC, nächster Montag 20:00 UTC)`.
+- **Monthly:** `[1. des Monats 20:00 UTC, 1. des Folgemonats 20:00 UTC)`.
+- **Daily** (*später, Phase 3*): `[20:00 UTC, nächster Tag 20:00 UTC)`.
+- **Season (jährlich, §10.1):** `[1. Jan 20:00 UTC, 1. Jan 20:00 UTC Folgejahr)`.
+
+> Hinweis: Da Grenze = Posting, gibt es **kein** Zeitfenster, in dem eine
+> Challenge aktiv aber noch nicht angekündigt ist.
 
 ### 8.3 Scheduler-Jobs (APScheduler, UTC)
 
@@ -464,9 +469,20 @@ beginnen/enden. Deshalb:
 4. **`reconcile`** — Sicherheitsnetz: beim Bot-Start verpasste Perioden
    nachholen (z.B. nach Downtime), idempotent über die Unique-Constraint.
 
-**Posting-Zeitpunkt:** Default = Periodenstart (00:00 UTC). Über `guilds.config`
-anpassbar (z.B. eine für AU+DE erträgliche Uhrzeit), sofern gewünscht — die
-**Wertungsperiode** bleibt davon unberührt (immer volle UTC-Periode).
+**Posting-Zeitpunkt:** = Periodenstart **20:00 UTC** (Grenze und Posting fallen
+zusammen). Über `guilds.config` anpassbar; bleibt für alle Mitglieder identisch.
+
+### 8.4 Wahl der Anker-Uhrzeit (20:00 UTC)
+
+Es gibt keine Uhrzeit, die für USA, DE und AU gleichzeitig „Tag" ist. **20:00 UTC**
+ist der fairste Kompromiss (niemand in der Tiefschlafphase):
+
+| Region | Lokalzeit bei 20:00 UTC |
+|---|---|
+| US-Pazifik (UTC-8/-7) | 12:00–13:00 (Mittag) |
+| US-Ostküste (UTC-5/-4) | 15:00–16:00 (Nachmittag) |
+| Deutschland (UTC+1/+2) | 21:00–22:00 (Abend) |
+| AU-Ostküste (UTC+10/+11) | 06:00–07:00 (früher Morgen) |
 
 ---
 
@@ -511,34 +527,41 @@ anpassbar (z.B. eine für AU+DE erträgliche Uhrzeit), sofern gewünscht — die
 - **Discord-Fallback (KANN, Phase 2):** Confirm/Deny auch über Buttons unter dem
   Mod-Review-Post, mit identischer Backend-Logik.
 
-### 9.3 Mehrfach-Einreichungen / Wertung
+### 9.3 Mehrfach-Einreichungen / Wertung (festgelegt)
 
 - Ein Spieler DARF mehrfach einreichen (z.B. bessere Zeit).
-- **Punkte:** Standardmäßig **1 Punkt pro bestätigtem Run**. → Policy bestätigen:
-  zählt jeder bestätigte Run einzeln, oder max. 1 Punkt pro Spieler pro Challenge?
-  (Siehe §16 — Default-Annahme: **1 Punkt pro Challenge pro Spieler**, um
-  Spam/Mehrfach-Uploads nicht zu belohnen; mehrere Runs dürfen eingereicht
-  werden, aber nur der erste bestätigte gibt den Punkt. Der **beste** Run zählt
-  für die metrische Rangliste.)
+- **Punkte:** **max. 1 Punkt pro Spieler pro Challenge** — Mehrfach-Einreichungen
+  geben **keine** zusätzlichen Punkte (kein Spam-Anreiz).
+- **Leaderboard-Anzeige:** In der **Per-Challenge-Rangliste** wird pro Spieler nur
+  das **beste bestätigte Ergebnis** angezeigt (gemäß aktiver Sortierung/Metrik).
+- **Weitere Einreichungen** des Spielers bleiben gespeichert und sind in dessen
+  **privatem Profil** (§12.4) sichtbar, erscheinen aber nicht im öffentlichen
+  Leaderboard.
 
 ---
 
 ## 10. Punkte, Ranglisten & Streaks
 
-### 10.1 Kumulative Punkte
+### 10.1 Kumulative Punkte & Seasons (festgelegt)
 
-- **1 Punkt pro bestätigtem Run** (gemäß §9.3-Policy), kumulativ über die Zeit.
+- **Max. 1 Punkt pro Spieler pro Challenge** (gemäß §9.3), kumulativ innerhalb
+  einer Season.
 - Gespeichert in `points_ledger` (append-only, idempotent). Deny/Revert eines
   zuvor bestätigten Runs entfernt den zugehörigen Punkt.
-- Aggregation: **All-Time** je Spieler (× Guild × Game). Periodenbezogene
+- **Seasons = jährlich:** Die kumulative Punktewertung läuft **pro Kalenderjahr**
+  und wird zum **Jahreswechsel zurückgesetzt** (Season-Grenze konsistent mit dem
+  Perioden-Anker, siehe §8 — Default **1. Januar 20:00 UTC** der jeweiligen
+  Season; alternativ 1. Jan 00:00 UTC, beim Implementieren festlegen).
+- Eine `season`-Dimension (z.B. Jahr `2026`) hängt an `points_ledger` →
+  **aktuelle Season** + **archivierte Seasons** (Hall of Fame) sind abfragbar.
+- Aggregation: pro Season je Spieler (× Guild × Game). Periodenbezogene
   Ranglisten (diese Woche / diesen Monat) per Zeitfilter ableitbar.
-
-> **Season-Reset:** Standardmäßig **All-Time** (kein Reset). Optionale Seasons
-> sind als spätere Erweiterung vorgesehen (Konfig pro Guild). Siehe §16.
 
 ### 10.2 Per-Challenge-Rangliste
 
-- Enthält die **bestätigten** Runs einer Challenge.
+- Enthält die **bestätigten** Runs einer Challenge, **pro Spieler nur das beste
+  Ergebnis** (gemäß aktiver Sortierung/Metrik). Weitere eigene Runs nur im
+  privaten Profil (§9.3, §12.4).
 - **Standard-Sortierung:** nach **Einreichungszeitpunkt aufsteigend**
   (= „zuerst geschafft").
 - **Mod-Umsortierung (live, je Challenge/Periode):** Der Mod KANN die Liste
@@ -576,7 +599,7 @@ anpassbar (z.B. eine für AU+DE erträgliche Uhrzeit), sofern gewünscht — die
 |---|---|
 | `/submit <youtube-link> [comment]` | Run einreichen. Erstes Token = gültiger YouTube-Link (Pflicht); Rest = Kommentar. Legt `submission (pending)` an. Keine Datei-Uploads. |
 | `/challenge [game]` | Aktuelle Weekly + Monthly Challenge(s) anzeigen (rendered_text, Zeitfenster, Bonus). |
-| `/leaderboard [period] [game]` | Rangliste: All-Time-Punkte oder Per-Challenge (Periode wählbar). |
+| `/leaderboard [period] [game]` | Rangliste: Season-Punkte (jährlich) oder Per-Challenge (Periode wählbar). |
 | `/mystats [game]` | Eigene Punkte, Streak, eingereichte/bestätigte Runs. |
 | `/help` | Kurzüberblick. |
 
@@ -629,8 +652,8 @@ anpassbar (z.B. eine für AU+DE erträgliche Uhrzeit), sofern gewünscht — die
 ### 12.3 Öffentlicher Bereich (ohne Login)
 
 - Aktuelle Weekly/Monthly Challenges je Game.
-- **Leaderboards:** All-Time-Punkte + Per-Challenge-Ranglisten (mit Streak-
-  Anzeige).
+- **Leaderboards:** Season-Punkte (jährlich) + Per-Challenge-Ranglisten (mit
+  Streak-Anzeige); archivierte Seasons abrufbar (Hall of Fame).
 - Challenge-Historie.
 - Auf dem Leaderboard ist ein **„Login"**-Button präsent, mit dem sich Spieler per
   Discord-OAuth anmelden, um ihr persönliches Profil zu sehen.
@@ -782,7 +805,8 @@ challenges.example.com {
 - Web: Discord-OAuth (für **alle** Nutzer), **Spieler-Profil** (eigene
   Challenges/Einreichungen/verpasste), **Mod-Review (confirm/deny + Metric
   setzen)**, öffentliches Punkte-Leaderboard + Per-Challenge-Rangliste.
-- Punkte-Ledger (1/Run), Standard-Sortierung nach Einreichungszeit.
+- Punkte-Ledger (1 Punkt/Spieler/Challenge) inkl. **jährlicher Season-Dimension**;
+  Standard-Sortierung nach Einreichungszeit; im Leaderboard nur bestes Ergebnis.
 
 ### Phase 2 — Komfort & Pflege
 - Mod-Umsortierung der Ranglisten (schnellste/längste/höchste/niedrigste).
@@ -794,38 +818,49 @@ challenges.example.com {
 ### Phase 3 — Erweiterungen
 - **Daily** Challenges (bei steigender Aktivität).
 - Spieler-Ban/Ausschluss + weitere Mod-Aktionen.
+- **Season-Archiv / Hall of Fame** (abgeschlossene Jahres-Seasons abrufbar).
 - Weitere **Games** (Seed + aktivieren) und vollständige **Multi-Guild**-Konfig-UI.
 
 ### Phase 4 — Optional
-- Seasons/Resets, Statistiken/Analytics, ggf. optionaler LLM-Challenge-Generator.
+- Statistiken/Analytics, ggf. optionaler LLM-Challenge-Generator.
 
 ---
 
 ## 16. Offene Punkte & Annahmen
 
-> Diese Punkte sind als **Annahmen** umgesetzt, sollten aber bestätigt werden.
+> **Geklärt** (vom Auftraggeber bestätigt):
+> - **Punkte-Policy:** max. **1 Punkt pro Spieler pro Challenge**; im Leaderboard
+>   nur das **beste** Ergebnis, weitere Runs nur im privaten Profil. (§9.3/§10)
+> - **Seasons:** **jährlich** (Reset zum Jahreswechsel). (§10.1)
+> - **Perioden-/Season-Anker:** **UTC**, Anker-Uhrzeit **20:00 UTC** (fairer
+>   USA/DE/AU-Kompromiss); Grenze = Posting. (§8)
+> - **Nachweis:** ausschließlich **YouTube-Links**, keine Datei-Speicherung. (§9)
+> - **OAuth:** für **alle** Nutzer; Spieler-Profil + Mod-Panel. (§12)
+>
+> **Noch offen / beim Implementieren festzulegen:**
 
-1. **Punkte-Policy bei Mehrfach-Einreichungen:** Annahme = **max. 1 Punkt pro
-   Spieler pro Challenge** (erster bestätigter Run); bester Run zählt für die
-   metrische Rangliste. (Alternative: 1 Punkt je bestätigtem Run.) — **bestätigen**
-2. **Season-Reset:** Annahme = **All-Time** ohne Reset; Seasons optional später.
-   — **bestätigen**
-3. **Wochen-/Monatsanker:** Annahme = **UTC**. Falls ein anderer gemeinsamer
-   Anker (AU/DE-Kompromiss) gewünscht ist: über `guilds.config`, aber für alle
-   identisch. — **bestätigen**
-4. **Posting-Uhrzeit:** Default = Periodenstart (00:00 UTC). Soll für AU+DE eine
-   konkrete, „menschenfreundliche" Uhrzeit gewählt werden (z.B. eine Zeit, die
-   in beiden Regionen okay ist)? — **bestätigen**
-5. **SBK-1-Datenpool:** Charaktere/Boards/Levels/Conditions in Anhang A sind ein
+1. **SBK-1-Datenpool:** Charaktere/Boards/Levels/Conditions in Anhang A sind ein
    **vorläufiger Seed** und MÜSSEN gegen das echte Spiel verifiziert werden.
    Pools sind ohnehin admin-pflegbar. (Hinweis: einige in den ursprünglichen
    Beispielen genannten Begriffe wie „Alpine 2", „Star", „Sunset Rock",
    „Ninja Land" stammen evtl. aus **SBK 2**, nicht SBK 1 — bitte beim Verifizieren
-   beachten.) — **verifizieren**
-6. **Discord-Bibliothek:** `discord.py` angenommen (Alternativen `py-cord`/
-   `nextcord`). — **bestätigen**
-7. **ID-Strategie & Frontend-CSS** (Pico vs. Tailwind): Implementierungsdetail,
+   beachten.) — **verifizieren** (Quellen siehe unten)
+2. **Season-Grenze exakt:** 1. Jan **20:00 UTC** (Anker-konform) vs. 00:00 UTC —
+   beim Implementieren final festlegen.
+3. **Discord-Bibliothek:** `discord.py` angenommen (Alternativen `py-cord`/
+   `nextcord`).
+4. **ID-Strategie & Frontend-CSS** (Pico vs. Tailwind): Implementierungsdetail,
    beim Scaffolding festlegen.
+
+### Quellen zur SBK-1-Datenverifikation
+
+- **Snowboard Kids Wiki (Fandom):** <https://snowboardkids.fandom.com/> —
+  Charaktere, Boards, Strecken pro Spiel.
+- **StrategyWiki – Snowboard Kids:** <https://strategywiki.org/wiki/Snowboard_Kids>
+- **GameFAQs (N64) – Snowboard Kids:** Guides/FAQs mit Shop-Boards & Strecken,
+  <https://gamefaqs.gamespot.com/n64/198848-snowboard-kids>
+- **MobyGames:** <https://www.mobygames.com/game/snowboard-kids/> (Release-Infos)
+- **Original-Handbuch (N64)** als verlässlichste Quelle für exakte Boards/Namen.
 
 ---
 
@@ -882,19 +917,19 @@ einige o.g. Beispielnamen gehören evtl. zu SBK 2).
 > **Slash** · Board **Big Air** · **Sunny Mountain**
 > **Auflage:** Keine Tricks
 > **⭐ Bonus:** Keine blauen Items
-> *Wertung: schnellste Zeit · Mo 00:00 UTC – So 23:59 UTC*
+> *Wertung: schnellste Zeit · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
 
 **Monthly (generated, hard, metric_type = score):**
 > 🏂 **Monthly Challenge** — *Snowboard Kids*
 > **Nancy** · Board **Star** · **Ninja Land**
 > **Auflage:** Triff jeden CPU 3×
 > **⭐ Bonus:** Triff 1 CPU mit Eis
-> *Wertung: höchste Punktzahl · 1. – letzter Tag des Monats (UTC)*
+> *Wertung: höchste Punktzahl · 1. 20:00 UTC – 1. Folgemonat 20:00 UTC*
 
 **Custom (admin freetext):**
 > 🏂 **Weekly Challenge (Special)** — *Snowboard Kids*
 > „Gewinne ein komplettes Rennen rückwärts gefahren — Video erforderlich."
-> *Wertung: zuerst geschafft · Mo 00:00 UTC – So 23:59 UTC*
+> *Wertung: zuerst geschafft · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
 
 ---
 
