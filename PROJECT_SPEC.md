@@ -261,13 +261,25 @@ RegularChallenge_DiscordBot/
 
 **`modes`** — Spielmodi (pro Game, optionaler Challenge-Baustein)
 - `id`, `game_id` (FK), `key`, `name`, `is_active`
+- `metric_type` (Standard-Wertung des Modus: `time` | `score` | `none`)
 - SBK1: `battle_race` (Standard), `time_attack`, `trick_game`, `speed_game`,
   `shot_game` (siehe Anhang A).
 
+**`mode_levels`** — welche Strecken in welchem Modus spielbar sind (n:m)
+- `mode_id` (FK), `level_id` (FK); PK = (`mode_id`, `level_id`)
+- **Kritisch für die Generierung:** nicht jeder Modus erlaubt jede Strecke
+  (z.B. Speed/Shot Game nur die ersten 3 Strecken, Trick Game nur die Half-Pipe).
+  Siehe Anhang A.
+
 **`levels`**
 - `id`, `game_id` (FK), `name`, `is_active`
-- `attributes` (JSONB): z.B. `{ "has_fall_off_zone": true, "lap_based": true }`
+- `attributes` (JSONB): z.B. `{ "can_fall_off_edge": true, "lap_based": true,
+  "trick_only": false }`
   → genutzt für Condition-Constraints (level-spezifische Conditions)
+  - `can_fall_off_edge`: auf dieser Strecke kann man vom Rand/aus der Map fallen
+    (Schalter für die „fall off the map"-Condition; z.B. Quicksand Valley = true,
+    Rookie Mountain = false wegen Guard Rails).
+  - `trick_only`: dedizierte Trick-Game-Map (keine reguläre Rennstrecke).
 
 **`conditions`** — der wiederverwendbare Regel-Pool
 - `id`, `game_id` (FK), `key` (slug), `is_active`
@@ -277,22 +289,36 @@ RegularChallenge_DiscordBot/
 - `difficulty_scaling` (JSONB): Mapping `easy/medium/hard → Wert/Range`
 - `bonus_eligible` (bool): darf als Condition2/Bonus gezogen werden
 - `requires` (JSONB Constraints): z.B.
-  `{ "level_attribute": "has_fall_off_zone" }`,
+  `{ "level_attribute": "can_fall_off_edge" }`,
   `{ "excludes_conditions": ["no_jumping"] }`,
   `{ "modes": ["battle_race"] }` (Condition nur in bestimmten Modi gültig, z.B.
   „triff alle 3 Gegner" nur im Battle Race)
 - `weight` (int, Default 1): Ziehwahrscheinlichkeit
 - `applies_to_metric` (optional Hinweis: `time` | `score` | `none`)
 
+**`objectives`** — eigenständige Ziel-Challenges (kein Rennen, siehe §6.3 `kind`)
+- `id`, `game_id` (FK), `key`, `is_active`
+- `template_text` (z.B. `"Spiele Alpine-Board auf Level 3 frei (Bestzeit)"`)
+- `metric_type`: `time` | `score` | `none`
+- `difficulty_scaling` (JSONB, optional)
+- Beispiele SBK1: „Alpine-Board auf Level 3 freispielen (Bestzeit)", „alle 3
+  Standard-Boards auf Level 3 bringen", „{n} Gold sammeln" — diese sind nicht an
+  eine einzelne Strecke gebunden (siehe §6.3, §7.5).
+
 ### 6.3 Challenges & Overrides
 
 **`challenges`** — konkrete, periodengebundene Aufgabe
 - `id` (PK), `guild_id` (FK), `game_id` (FK)
+- `kind`: `race` (Standard-Baukasten) | `objective` (eigenständiges Ziel)
 - `period_type`: `weekly` | `monthly` | `daily`
 - `starts_at`, `ends_at` (UTC, inklusiv/exklusiv klar definieren)
-- **Bausteine** (nullable bei reinem Freitext):
+- **Bausteine bei `kind = race`** (nullable bei reinem Freitext):
   `character_id`, `board_id`, `level_id`, `mode_id` (optional), `condition1_id`,
   `condition2_id`
+- **Bei `kind = objective`:** `objective_id` (FK objectives); Character/Board/
+  Level/Mode bleiben i.d.R. leer.
+- **Immer nur EINE Strecke** pro Challenge — niemals ein kompletter Cup/Pass-Lauf
+  (Pass-Runs dauern bis ~40 Min; siehe §7.6).
 - `difficulty`: `easy` | `medium` | `hard`
 - `condition1_value`, `condition2_value` (konkretisierte numerische Werte)
 - `source`: `generated` | `custom`
@@ -387,10 +413,14 @@ def generate_challenge(guild, game, period_type, starts_at, ends_at):
 
     rng = seeded_rng(guild.id, game.id, period_type, starts_at)  # reproduzierbar
 
-    # 2) Bausteine ziehen (nur is_active)
+    # 1a) Challenge-Art wählen (überwiegend Rennen, selten Objective)
+    if rng.random() < OBJECTIVE_PROBABILITY:
+        return generate_objective(game, rng, ...)   # siehe §7.5
+
+    # 2) Modus ZUERST ziehen, dann eine im Modus spielbare Strecke (§7.6)
     character = rng.choice(active_characters(game))
-    level     = rng.choice(active_levels(game))
     mode      = rng.choice(active_modes(game))      # optional, je nach Game-Config
+    level     = rng.choice(levels_for_mode(mode))   # NUR Strecken aus mode_levels!
 
     # 2a) Board passend zum Charakter (Shinobin-Regel!)
     if character.uses_exclusive_boards_only:
@@ -432,12 +462,18 @@ def generate_challenge(guild, game, period_type, starts_at, ends_at):
   `uses_exclusive_boards_only` (z.B. **Shinobin**) erhalten **nur** ihre
   exklusiven Boards; Exklusiv-Boards dürfen **niemals** anderen Charakteren
   zugewiesen werden.
-- **Modus-Kompatibilität:** Eine Condition mit `requires.modes` darf nur in den
-  genannten Modi gezogen werden (z.B. „triff alle 3 Gegner" nur im Battle Race,
-  nicht im Time Attack).
+- **Mode↔Level-Kompatibilität (MUSS):** Die Strecke MUSS aus `mode_levels` des
+  gewählten Modus stammen. Speed/Shot Game → nur die ersten 3 Strecken, Trick Game
+  → nur die Half-Pipe, Battle Race/Time Attack → alle Rennstrecken (Anhang A).
+  Deshalb wird **erst der Modus, dann die Strecke** gezogen.
+- **Modus-Kompatibilität (Conditions):** Eine Condition mit `requires.modes` darf
+  nur in den genannten Modi gezogen werden (z.B. „triff alle 3 Gegner" nur im
+  Battle Race, nicht im Time Attack).
 - **Level-Kompatibilität:** Eine Condition mit `requires.level_attribute` darf nur
   gezogen werden, wenn das Level dieses Attribut besitzt (z.B. „fall off the map"
-  nur bei `has_fall_off_zone`).
+  nur bei `can_fall_off_edge`).
+- **Eine Strecke pro Challenge (MUSS):** Challenges referenzieren genau **eine**
+  Strecke; **keine** kompletten Cup-/Pass-Läufe (zu lang, §7.6).
 - **Gegenseitiger Ausschluss:** `requires.excludes_conditions` verhindert
   widersprüchliche Kombis (z.B. „no jumping" + „2 unique special tricks").
 - **Bonus-Eligibilität:** Condition2 nur aus `bonus_eligible = true`.
@@ -459,6 +495,33 @@ def generate_challenge(guild, game, period_type, starts_at, ends_at):
   gewählten Bausteinen.
 - Beim Periodenstart hat der Override **Vorrang** vor dem Generator.
 - `metric_type` und `default_sort` sind auch bei Custom-Challenges setzbar.
+
+### 7.5 Objective-Challenges (eigenständige Ziele)
+
+Neben den Renn-Challenges (Baukasten) gibt es **Objective-Challenges**
+(`kind = objective`) — eigenständige Ziele, die **nicht** an eine einzelne
+Strecke gebunden sind. Beispiele (SBK1):
+
+- „**Alpine-Board auf Level 3 freispielen** — Bestzeit" (die ersten ~15 Min eines
+  Copper-Pass-Laufs bestehen oft genau daraus). Metrik = Zeit.
+- „**Alle 3 Standard-Boards auf Level 3**" — Bestzeit oder pass/fail.
+- „**{n} Gold sammeln**" — skalierbar.
+
+Sie werden aus dem `objectives`-Pool gezogen (selten, `OBJECTIVE_PROBABILITY`)
+oder bevorzugt **vom Admin geplant**. `metric_type` kommt aus dem Objective.
+
+### 7.6 Strecken-Längen-Constraint (Hintergrund)
+
+Vollständige **Pass-/Cup-Läufe** (mehrere Strecken am Stück) dauern sehr lange —
+ein Copper-Pass-Lauf liegt bei ~40 Minuten (Speedrun-WR). Challenges beziehen
+sich daher **immer auf eine einzelne Strecke** (oder ein Objective), nie auf einen
+ganzen Pass. Das hält Einreichungs-Videos kurz und die Hürde niedrig.
+
+> **Begriffsklärung „Gold Cup":** = **Erstplatzierung** auf einer Strecke. Gold
+> auf allen 6 Basis-Strecken → **Copper Pass** → schaltet **Quicksand Valley**
+> frei; analog **Silver Pass** → Silver Mountain, **Gold Pass** → Ninja Land
+> (Sieg dort schaltet Shinobin frei). Für die Generierung irrelevant, da bei
+> allen Spielern alles freigeschaltet ist.
 
 ---
 
@@ -707,6 +770,70 @@ Nach OAuth-Login sieht **jeder** Spieler sein eigenes Profil mit:
 > Fremde Profile zeigen höchstens öffentliche Aggregat-Daten (Punkte, Streak),
 > wie sie ohnehin im Leaderboard erscheinen.
 
+### 12.5 Visuelles Design / Style Guide
+
+**Referenz:** Das Standard-Board aus dem **PAINT-Screen** von Snowboard Kids
+(eisweiß-hellblaue Board-Fläche mit violett-magenta Marmor-/Splatter-Muster vor
+royalblauem Grund) — siehe
+[`docs/design/sbk-standard-board-paint-screen.png`](docs/design/sbk-standard-board-paint-screen.png).
+Die Website-Optik orientiert sich an **diesem Board** — **nicht** am gekachelten
+Menü-Hintergrund. Vibe: **retro 90er, verschneit,
+verspielt, aber aufgeräumt und gut lesbar**.
+
+**Farbpalette (Design-Tokens, Hex ≈ Richtwerte — am echten Board feinjustieren):**
+
+| Token | Hex (ca.) | Verwendung |
+|---|---|---|
+| `--frost-white` | `#F2F7FB` | Haupt-Hintergrund / Flächen |
+| `--ice-blue` | `#CFE2F0` | Karten-Flächen, Hover, Trennlinien |
+| `--royal-blue` | `#1C5FB4` | Primärfarbe (Header, Links, Buttons) |
+| `--deep-navy` | `#15294A` | Fließtext / Überschriften |
+| `--board-purple` | `#7B3FA0` | Akzent 1 (Badges, aktive Zustände) |
+| `--splatter-magenta` | `#C86FD1` | Akzent 2 (Highlights, Verläufe, Splatter-Motiv) |
+| `--retro-gradient` | `#E23B2E → #F39423 → #F6D33C` | **sparsam** für Logo/Top-Badges (rot→orange→gelb wie der „PAINT"-Schriftzug) |
+
+> Kontrast nach **WCAG AA** sicherstellen (z.B. `--deep-navy` auf `--frost-white`;
+> Weiß auf `--royal-blue`/`--board-purple`). Optionaler **Dark Mode** später.
+
+**Typografie:**
+- **Headings/Logo:** kräftige, runde Retro-/Display-Schrift, die an den
+  Arcade-Titel erinnert (z.B. *Fredoka*, *Baloo 2* oder eine ähnliche dicke,
+  abgerundete Schrift); der Brand-Schriftzug darf den rot-orange-gelb-Verlauf
+  tragen.
+- **Body/UI:** gut lesbare Sans (z.B. *Inter* oder *Nunito*).
+
+**Motive & Texturen:**
+- **Splatter/Marmor-Akzent** (violett→magenta) als dezentes Deko-Element:
+  Header-Band, Karten-Akzentkante, Divider, Podium-Hintergrund. Nicht
+  flächendeckend/störend einsetzen.
+- **Board-Silhouette** als wiederkehrendes Motiv: abgerundete, leicht „board-
+  förmige" Karten (große `border-radius`), Board-Icon im Logo.
+- **Schnee/Eis**-Anklänge (sanfte Verläufe, dezente Frost-Optik), **kein**
+  gekachelter, busy Hintergrund.
+
+**Komponenten:**
+- **Leaderboard** als „Scoreboard": klare Tabelle/Liste, Zebra-Streifen in
+  `--ice-blue`, **Podium (Top 3)** mit Gold/Silber/Bronze + Splatter-Akzent,
+  Streak-Badge, Avatar (Discord).
+- **Challenge-Karten:** Board-förmige Karten mit Game/Periode, `rendered_text`,
+  Bonus-Stern (⭐), Restlaufzeit; Difficulty als farbiges Badge
+  (easy/medium/hard).
+- **Mod-Review:** ruhige, funktionale Oberfläche (YouTube-Embed + Kommentar +
+  Confirm/Deny), Akzentfarben nur für Aktionen.
+- **Buttons/CTA:** `--royal-blue` primär, `--board-purple` sekundär; Hover/Aktiv
+  mit Magenta-Akzent.
+
+**Layout & Technik:**
+- **Mobile-first & responsive** (viele Nutzer kommen per Discord vom Handy).
+- Umsetzung mit **Jinja2 + HTMX** auf **Pico.css**-Basis (oder Tailwind),
+  überschrieben durch obige **CSS-Custom-Properties** (`:root { --royal-blue: … }`)
+  als zentrale Design-Tokens.
+- Konsistente Spacing-/Radius-Skala; große, klickbare Touch-Targets.
+
+> Die Hex-Werte sind Richtwerte aus dem Screenshot; der ausführende Agent SOLL
+> sie am Original-Board (PAINT-Screen) final abstimmen und als Token-Set in einer
+> `theme.css`/`tokens.css` zentralisieren.
+
 ---
 
 ## 13. Multi-Game & Multi-Guild Design
@@ -868,13 +995,16 @@ challenges.example.com {
 > **Noch offen / beim Implementieren festzulegen:**
 
 1. **SBK-1-Datenpool:** In Anhang A **recherchiert & abgeglichen** (Charaktere,
-   Boards, Levels, Modi). Beim Seed noch verifizieren: exakte **Shinobin-Board-
-   Namen**, `has_fall_off_zone` pro Strecke, Standard-Board-Level (1–3).
-2. **Season-Grenze exakt:** 1. Jan **20:00 UTC** (Anker-konform) vs. 00:00 UTC —
+   Boards, Levels, Modi, Mode↔Level-Verfügbarkeit). Beim Seed noch verifizieren:
+   exakte **Shinobin-Board-Namen**, `can_fall_off_edge` pro Strecke (Stand:
+   nur Quicksand Valley), Half-Pipe-Name, Standard-Board-Level (1–3).
+2. **Condition-/Difficulty-Werte:** realistische Zahlen gegen **speedrun.com/sbk**
+   kalibrieren (Platzhalter in Anhang A).
+3. **Season-Grenze exakt:** 1. Jan **20:00 UTC** (Anker-konform) vs. 00:00 UTC —
    beim Implementieren final festlegen.
-3. **Discord-Bibliothek:** `discord.py` angenommen (Alternativen `py-cord`/
+4. **Discord-Bibliothek:** `discord.py` angenommen (Alternativen `py-cord`/
    `nextcord`).
-4. **ID-Strategie & Frontend-CSS** (Pico vs. Tailwind): Implementierungsdetail,
+5. **ID-Strategie & Frontend-CSS** (Pico vs. Tailwind): Implementierungsdetail,
    beim Scaffolding festlegen.
 
 ### Quellen zur SBK-1-Recherche
@@ -884,6 +1014,8 @@ challenges.example.com {
   <https://strategywiki.org/wiki/Snowboard_Kids>
 - **GameFAQs (N64) – Snowboard Kids (Guides/Cheats):**
   <https://gamefaqs.gamespot.com/n64/366874-snowboard-kids>
+- **speedrun.com/sbk** — Kategorien & Leaderboards zur Wertungs-/Difficulty-
+  Kalibrierung: <https://www.speedrun.com/sbk>
 - **MobyGames:** <https://www.mobygames.com/game/snowboard-kids/> (Release-Infos)
 - **Original-Handbuch (N64)** als verlässlichste Quelle für exakte Boards/Namen.
 
@@ -920,66 +1052,89 @@ challenges.example.com {
 | `Feather Board` | special | aus dem Trick Game; kurzer Float-Effekt am Sprung |
 | `Shinobin Board 1–3` | exclusive | `exclusive_to_character_id = Shinobin`; **nur** Shinobin (exakte Namen beim Seed verifizieren) |
 
-> Hinweis: Standard-Boards haben im Spiel Level 1–3 (Upgrades). Für Challenges
-> i.d.R. irrelevant; bei Bedarf als `meta`-Feld modellierbar.
+> Hinweis: Standard-Boards haben im Spiel Level 1–3 (Upgrades). Für Renn-
+> Challenges i.d.R. irrelevant, aber Basis für **Objective-Challenges** wie
+> „Alpine auf Level 3 freispielen" (§7.5).
 
-**Levels (9):**
+**Levels (9 Rennstrecken + 1 Trick-Map):**
 
-| name | unlock (im Spiel) | attributes (Vorschlag) |
+| name | unlock (im Spiel) | attributes |
 |---|---|---|
-| `Rookie Mountain` | Start | `lap_based` |
+| `Rookie Mountain` | Start | `lap_based`; `can_fall_off_edge=false` (Guard Rails) |
 | `Big Snowman` | Start | `lap_based` |
 | `Sunset Rock` | Start | `lap_based` |
 | `Night Highway` | Start | `lap_based` |
 | `Grass Valley` | Start | `lap_based` |
 | `Dizzy Land` | Start | `lap_based` |
-| `Quicksand Valley` | Gold Cups Strecke 1–6 | `lap_based`, `has_fall_off_zone` (prüfen) |
-| `Silver Mountain` | Gold Cups inkl. Quicksand V. | `lap_based`, `has_fall_off_zone` (prüfen) |
-| `Ninja Land` | Gold Cups inkl. Silver M.; Sieg schaltet **Shinobin** frei | `lap_based`, `has_fall_off_zone` (prüfen) |
+| `Quicksand Valley` | Copper Pass (Gold auf Basis-6) | `lap_based`; **`can_fall_off_edge=true`** |
+| `Silver Mountain` | Silver Pass | `lap_based` |
+| `Ninja Land` | Gold Pass; Sieg schaltet **Shinobin** frei | `lap_based` |
+| `Half-Pipe` | – (nur Trick Game) | `trick_only=true` |
 
-> `has_fall_off_zone` pro Strecke beim Seed verifizieren (steuert die
-> „fall off the map"-Condition).
+> **`can_fall_off_edge`** markiert Strecken, auf denen man tatsächlich vom Rand/
+> aus der Map fallen kann (Schalter für die „fall off the map"-Condition). Stand
+> Recherche/Community: praktisch nur **Quicksand Valley**; die übrigen Strecken
+> haben Guard Rails → `false`. Pro Strecke mit der Community final verifizieren.
 
-**Modes (5):**
+**Modes (5) + Strecken-Verfügbarkeit (`mode_levels`):**
 
-| key | name | Hinweis |
+| key | name | spielbare Strecken | metric_type |
+|---|---|---|---|
+| `battle_race` | Battle Race | **alle 9** Rennstrecken | time |
+| `time_attack` | Time Attack | **alle 9** Rennstrecken | time |
+| `speed_game` | Speed Game | **nur erste 3** (Rookie Mountain, Big Snowman, Sunset Rock) | time |
+| `shot_game` | Shot Game | **nur erste 3** (Rookie Mountain, Big Snowman, Sunset Rock) | score |
+| `trick_game` | Trick Game | **nur Half-Pipe** | score |
+
+> ⚠️ **Generierungs-Regel:** erst Modus, dann Strecke aus dessen `mode_levels`
+> ziehen (§7.6). So entstehen nie unspielbare Kombis wie „Shot Game auf Ninja
+> Land" oder „Trick Game auf Rookie Mountain".
+
+**Objectives (Beispiel-Pool, §7.5):**
+
+| key | template_text | metric_type |
 |---|---|---|
-| `battle_race` | Battle Race | Standard-Rennen mit Items/Gegnern |
-| `time_attack` | Time Attack | Bestzeit, keine Items |
-| `trick_game` | Trick Game | Punkte für Tricks (eigene Mini-Level) |
-| `speed_game` | Speed Game | wie Time Attack, mit Speed-Fans |
-| `shot_game` | Shot Game | Schneemänner/Gegner mit Items abschießen |
-
-> Modus ist ein **optionaler** Baustein. Viele Conditions sind modus-spezifisch
-> (z.B. „triff alle 3 Gegner" → `requires.modes: [battle_race]`; „X Punkte im
-> Trick" → `trick_game`).
+| `unlock_alpine_lvl3` | „Spiele das Alpine-Board auf Level 3 frei — Bestzeit" | time |
+| `unlock_board_lvl3_any` | „Bringe ein beliebiges Standard-Board auf Level 3 — Bestzeit" | time |
+| `unlock_all_standard_lvl3` | „Bringe alle 3 Standard-Boards auf Level 3" | time |
+| `collect_gold_n` | „Sammle {n} Gold" | none |
 
 **Conditions (Pool, McGyna-Ideen → als Daten modellieren):**
 
 | key | template_text | type | bonus_eligible | requires (Beispiel) |
 |---|---|---|---|---|
 | `no_tricks` | „Keine Tricks" | pass_fail | ja | – |
-| `no_blue_items` | „Keine blauen Items benutzen" | pass_fail | ja | – |
-| `no_red_items` | „Keine roten Items benutzen" | pass_fail | ja | – |
-| `no_items` | „Keine Items benutzen" | pass_fail | ja | – |
+| `no_blue_items` | „Keine blauen Items benutzen" | pass_fail | ja | `modes:[battle_race]` |
+| `no_red_items` | „Keine roten Items benutzen" | pass_fail | ja | `modes:[battle_race]` |
+| `no_items` | „Keine Items benutzen" | pass_fail | ja | `modes:[battle_race]` |
 | `no_wipeouts` | „Keine Wipeouts/Stürze" | pass_fail | ja | – |
 | `no_bonks` | „Keine Bonks" | pass_fail | ja | – |
-| `no_jumping` | „Nicht springen" | pass_fail | ja | `excludes: [special_tricks]` |
-| `hit_all_opponents` | „Triff alle 3 Gegner" | pass_fail | nein | – |
-| `hit_cpu_with_ice` | „Triff {n} CPU mit Eis" | numeric | ja | – |
-| `hit_every_cpu_n` | „Triff jeden CPU {n}×" | numeric | nein | – |
-| `special_tricks` | „{n} unterschiedliche Spezial-Tricks" | numeric | nein | `excludes: [no_jumping, no_tricks]` |
+| `no_jumping` | „Nicht springen" | pass_fail | ja | `excludes:[special_tricks]` |
+| `hit_all_opponents` | „Triff alle 3 Gegner" | pass_fail | nein | `modes:[battle_race]` |
+| `hit_cpu_with_ice` | „Triff {n} CPU mit Eis" | numeric | ja | `modes:[battle_race]` |
+| `hit_every_cpu_n` | „Triff jeden CPU {n}×" | numeric | nein | `modes:[battle_race]` |
+| `shoot_snowmen_n` | „Schieße {n} Schneemänner ab" | numeric | nein | `modes:[shot_game]` |
+| `trick_points_n` | „Erreiche {n} Trick-Punkte" | numeric | nein | `modes:[trick_game]` |
+| `special_tricks` | „{n} unterschiedliche Spezial-Tricks" | numeric | nein | `excludes:[no_jumping,no_tricks]` |
 | `spin_all_directions` | „Spin-Trick in jede Richtung" | pass_fail | ja | – |
-| `fall_off_map_n` | „Falle {n}× von der Map" | numeric | ja | `level_attribute: has_fall_off_zone` |
+| `fall_off_map_n` | „Falle {n}× von der Map" | numeric | ja | `level_attribute:can_fall_off_edge` |
 | `button_restriction` | „Verzicht auf Eingabe: {button}" | pass_fail | ja | – |
-| `win_from_4th_lap3` | „Gewinne, obwohl zu Beginn von Lap 3 auf Platz 4" | pass_fail | nein | `lap_based` |
+| `win_from_4th_lap3` | „Gewinne, obwohl zu Beginn von Lap 3 auf Platz 4" | pass_fail | nein | `level_attribute:lap_based`, `modes:[battle_race]` |
 | `zoolander` | „Keine Linkskurven (Zoolander)" | pass_fail | ja | – |
 
-> **Difficulty-Scaling-Beispiele** (`difficulty_scaling`):
+> **Difficulty-Scaling-Beispiele** (`difficulty_scaling`, **Platzhalter** —
+> realistische Werte gegen **speedrun.com** kalibrieren, s.u.):
 > - `hit_cpu_with_ice`: easy=1, medium=2, hard=3
 > - `hit_every_cpu_n`: easy=1, medium=2, hard=3
 > - `special_tricks`: easy=2, medium=3, hard=4
 > - `fall_off_map_n`: easy=1, medium=2, hard=3
+> - `shoot_snowmen_n` / `trick_points_n`: gegen reale Bestwerte kalibrieren
+
+> **Kalibrierung der Wertungen/Schwierigkeiten:** Realistische Ziel-Zeiten und
+> -Punkte sollen sich an den Kategorien und Ergebnissen von **speedrun.com/sbk**
+> orientieren (z.B. Einzelstrecken-Bestzeiten als Referenz für „Difficulty-Tiers"
+> bzw. Erwartungswerte). Beim Seed/Tuning konkrete Werte aus den Leaderboards
+> übernehmen.
 
 ---
 
@@ -1005,6 +1160,23 @@ challenges.example.com {
 > **Silver Mountain** · Modus **Battle Race**
 > **Auflage:** Keine Items
 > *Wertung: schnellste Zeit · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
+
+**Shot Game (zeigt Mode↔Level-Regel — nur erste 3 Strecken):**
+> 🏂 **Weekly Challenge** — *Snowboard Kids*
+> **Tommy** · Board **Freestyle** · **Big Snowman** · Modus **Shot Game**
+> **Auflage:** Schieße 8 Schneemänner ab
+> *Wertung: höchste Punktzahl · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
+
+**Trick Game (nur Half-Pipe):**
+> 🏂 **Weekly Challenge** — *Snowboard Kids*
+> **Linda** · Board **Feather Board** · **Half-Pipe** · Modus **Trick Game**
+> **Auflage:** Erreiche 3.000 Trick-Punkte
+> *Wertung: höchste Punktzahl · Mo 20:00 UTC – Mo 20:00 UTC (1 Woche)*
+
+**Objective (kind = objective):**
+> 🏂 **Monthly Challenge** — *Snowboard Kids*
+> **Ziel:** Spiele das **Alpine-Board auf Level 3** frei — schnellste Zeit.
+> *Wertung: schnellste Zeit · 1. 20:00 UTC – 1. Folgemonat 20:00 UTC*
 
 **Custom (admin freetext):**
 > 🏂 **Weekly Challenge (Special)** — *Snowboard Kids*
